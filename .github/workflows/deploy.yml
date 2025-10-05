@@ -1,0 +1,93 @@
+name: Build and Deploy to Raspberry Pi
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+    # Шаг 1: Checkout кода
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    # Шаг 2: Установка Go
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.21'
+
+    # Шаг 3: Кэширование Go модулей
+    - name: Cache Go modules
+      uses: actions/cache@v3
+      with:
+        path: ~/go/pkg/mod
+        key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-
+
+    # Шаг 4: Загрузка зависимостей
+    - name: Download dependencies
+      run: go mod download
+
+    # Шаг 5: Запуск тестов (если есть)
+    - name: Run tests
+      run: go test -v ./...
+
+    # Шаг 6: Сборка для ARM64 (Raspberry Pi)
+    - name: Build for ARM64
+      env:
+        GOOS: linux
+        GOARCH: arm64
+        CGO_ENABLED: 0
+      run: |
+        go build -o instantmeet-signaling-arm64 -ldflags="-s -w" .
+        chmod +x instantmeet-signaling-arm64
+
+    # Шаг 7: Деплой на Raspberry Pi через SSH
+    - name: Deploy to Raspberry Pi
+      if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+      uses: appleboy/ssh-action@v1.0.3
+      with:
+        host: ${{ secrets.SSH_HOST }}
+        username: ${{ secrets.SSH_USER }}
+        key: ${{ secrets.SSH_PRIVATE_KEY }}
+        port: ${{ secrets.SSH_PORT }}
+        script: |
+          # Создаем директорию если не существует
+          mkdir -p ~/instantmeet-signaling
+          
+    # Шаг 8: Копирование бинарника на Raspberry Pi
+    - name: Copy binary to Raspberry Pi
+      if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+      uses: appleboy/scp-action@v0.1.7
+      with:
+        host: ${{ secrets.SSH_HOST }}
+        username: ${{ secrets.SSH_USER }}
+        key: ${{ secrets.SSH_PRIVATE_KEY }}
+        port: ${{ secrets.SSH_PORT }}
+        source: "instantmeet-signaling-arm64"
+        target: "~/instantmeet-signaling/"
+
+    # Шаг 9: Перезапуск сервиса на Raspberry Pi
+    - name: Restart service on Raspberry Pi
+      if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+      uses: appleboy/ssh-action@v1.0.3
+      with:
+        host: ${{ secrets.SSH_HOST }}
+        username: ${{ secrets.SSH_USER }}
+        key: ${{ secrets.SSH_PRIVATE_KEY }}
+        port: ${{ secrets.SSH_PORT }}
+        script: |
+          cd ~/instantmeet-signaling
+          chmod +x instantmeet-signaling-arm64
+          
+          # Перезапускаем systemd сервис
+          sudo systemctl restart instantmeet-signaling.service
+          
+          # Проверяем статус
+          sudo systemctl status instantmeet-signaling.service
