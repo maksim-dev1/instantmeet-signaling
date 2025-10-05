@@ -3,7 +3,7 @@ instantmeet-signaling
 instantmeet-signaling-arm64
 
 # Go modules
-go.sum
+#go.sum
 
 # OS files
 .DS_Store
