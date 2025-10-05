@@ -16,12 +16,14 @@ type Client struct {
 	Conn     *websocket.Conn
 	RoomID   string
 	Username string
+	Send     chan Message
+	mu       sync.Mutex
 }
 
 // Структура для комнаты
 type Room struct {
 	ID      string
-	Clients map[string]*Client
+	Clients map[*Client]bool
 	mu      sync.Mutex
 }
 
@@ -46,22 +48,24 @@ var (
 	roomsMu sync.Mutex
 )
 
-// Получение или создание комнаты
-func getOrCreateRoom(roomID string) *Room {
-	roomsMu.Lock()
-	defer roomsMu.Unlock()
+// Writer goroutine для клиента
+func (c *Client) writePump() {
+	defer func() {
+		c.Conn.Close()
+	}()
 
-	if room, exists := rooms[roomID]; exists {
-		return room
-	}
+	for message := range c.Send {
+		data, err := json.Marshal(message)
+		if err != nil {
+			log.Printf("Ошибка сериализации сообщения: %v", err)
+			continue
+		}
 
-	room := &Room{
-		ID:      roomID,
-		Clients: make(map[string]*Client),
+		if err := c.Conn.WriteMessage(websocket.TextMessage, data); err != nil {
+			log.Printf("Ошибка отправки сообщения клиенту %s: %v", c.ID, err)
+			return
+		}
 	}
-	rooms[roomID] = room
-	log.Printf("Создана новая комната: %s", roomID)
-	return room
 }
 
 // Обработчик WebSocket соединений
@@ -74,7 +78,11 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	client := &Client{
 		Conn: conn,
+		Send: make(chan Message, 256),
 	}
+
+	// Запускаем горутину для отправки сообщений
+	go client.writePump()
 
 	log.Printf("Новое WebSocket соединение")
 
@@ -87,6 +95,7 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			if client.RoomID != "" {
 				removeClientFromRoom(client)
 			}
+			close(client.Send)
 			conn.Close()
 			break
 		}
@@ -120,12 +129,46 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 // Обработка присоединения к комнате
 func handleJoin(client *Client, msg Message) {
 	client.ID = msg.From
-	client.RoomID = msg.RoomID
 	client.Username = msg.Username
 
-	room := getOrCreateRoom(msg.RoomID)
+	// Если roomId пустой, игнорируем это сообщение
+	if msg.RoomID == "" {
+		log.Printf("Получен join без roomId от клиента %s", client.ID)
+		return
+	}
+
+	client.RoomID = msg.RoomID
+
+	// Получаем или создаем комнату
+	roomsMu.Lock()
+	room, exists := rooms[msg.RoomID]
+	if !exists {
+		room = &Room{
+			ID:      msg.RoomID,
+			Clients: make(map[*Client]bool),
+		}
+		rooms[msg.RoomID] = room
+		log.Printf("Создана новая комната: %s", msg.RoomID)
+	}
+	roomsMu.Unlock()
+
+	// Добавляем клиента в комнату
 	room.mu.Lock()
-	room.Clients[client.ID] = client
+	room.Clients[client] = true
+
+	// Уведомляем ВСЕХ других участников о новом пользователе
+	for otherClient := range room.Clients {
+		if otherClient != client {
+			notification := Message{
+				Type:     "user-joined",
+				From:     client.ID,
+				Username: client.Username,
+				RoomID:   msg.RoomID,
+			}
+			otherClient.Send <- notification
+			log.Printf("Отправлено уведомление user-joined клиенту %s о присоединении %s", otherClient.ID, client.ID)
+		}
+	}
 	room.mu.Unlock()
 
 	log.Printf("Клиент %s (%s) присоединился к комнате %s", client.ID, client.Username, client.RoomID)
@@ -135,15 +178,7 @@ func handleJoin(client *Client, msg Message) {
 		Type:   "joined",
 		RoomID: client.RoomID,
 	}
-	sendMessage(client, response)
-
-	// Уведомляем других участников комнаты
-	notifyOthersInRoom(client, Message{
-		Type:     "user-joined",
-		From:     client.ID,
-		Username: client.Username,
-		RoomID:   client.RoomID,
-	})
+	client.Send <- response
 }
 
 // Обработка signaling сообщений (offer, answer, ice-candidate)
@@ -153,17 +188,28 @@ func handleSignaling(client *Client, msg Message) {
 		return
 	}
 
+	roomsMu.Lock()
 	room := rooms[client.RoomID]
+	roomsMu.Unlock()
+
 	if room == nil {
 		log.Printf("Комната не найдена: %s", client.RoomID)
 		return
 	}
 
 	room.mu.Lock()
-	targetClient, exists := room.Clients[msg.To]
-	room.mu.Unlock()
+	defer room.mu.Unlock()
 
-	if !exists {
+	// Ищем получателя в комнате
+	var targetClient *Client
+	for c := range room.Clients {
+		if c.ID == msg.To {
+			targetClient = c
+			break
+		}
+	}
+
+	if targetClient == nil {
 		log.Printf("Получатель не найден: %s", msg.To)
 		return
 	}
@@ -172,7 +218,7 @@ func handleSignaling(client *Client, msg Message) {
 	msg.From = client.ID
 
 	log.Printf("Перенаправление сообщения типа %s от %s к %s", msg.Type, msg.From, msg.To)
-	sendMessage(targetClient, msg)
+	targetClient.Send <- msg
 }
 
 // Обработка выхода из комнаты
@@ -186,24 +232,30 @@ func removeClientFromRoom(client *Client) {
 		return
 	}
 
+	roomsMu.Lock()
 	room := rooms[client.RoomID]
+	roomsMu.Unlock()
+
 	if room == nil {
 		return
 	}
 
 	room.mu.Lock()
-	delete(room.Clients, client.ID)
+	delete(room.Clients, client)
 	clientCount := len(room.Clients)
+
+	// Уведомляем других участников
+	for otherClient := range room.Clients {
+		notification := Message{
+			Type:   "user-left",
+			From:   client.ID,
+			RoomID: client.RoomID,
+		}
+		otherClient.Send <- notification
+	}
 	room.mu.Unlock()
 
 	log.Printf("Клиент %s покинул комнату %s", client.ID, client.RoomID)
-
-	// Уведомляем других участников
-	notifyOthersInRoom(client, Message{
-		Type:   "user-left",
-		From:   client.ID,
-		RoomID: client.RoomID,
-	})
 
 	// Удаляем пустую комнату
 	if clientCount == 0 {
@@ -211,36 +263,6 @@ func removeClientFromRoom(client *Client) {
 		delete(rooms, client.RoomID)
 		roomsMu.Unlock()
 		log.Printf("Комната %s удалена (пустая)", client.RoomID)
-	}
-}
-
-// Отправка сообщения клиенту
-func sendMessage(client *Client, msg Message) {
-	data, err := json.Marshal(msg)
-	if err != nil {
-		log.Printf("Ошибка сериализации сообщения: %v", err)
-		return
-	}
-
-	if err := client.Conn.WriteMessage(websocket.TextMessage, data); err != nil {
-		log.Printf("Ошибка отправки сообщения: %v", err)
-	}
-}
-
-// Уведомление других участников комнаты
-func notifyOthersInRoom(sender *Client, msg Message) {
-	room := rooms[sender.RoomID]
-	if room == nil {
-		return
-	}
-
-	room.mu.Lock()
-	defer room.mu.Unlock()
-
-	for clientID, client := range room.Clients {
-		if clientID != sender.ID {
-			sendMessage(client, msg)
-		}
 	}
 }
 

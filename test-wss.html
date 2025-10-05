@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>WSS Test</title>
+</head>
+<body>
+    <h1>Secure WebSocket Test</h1>
+    <div id="status">Connecting...</div>
+    <div id="messages"></div>
+
+    <script>
+        const ws = new WebSocket('wss://signal.progger.pro/ws');
+        
+        ws.onopen = function() {
+            document.getElementById('status').innerHTML = '<b style="color:green">Connected!</b>';
+            
+            // Отправляем тестовое join сообщение
+            const joinMsg = {
+                type: 'join',
+                from: 'test-client-wss',
+                roomId: 'test-room',
+                username: 'Test User WSS'
+            };
+            ws.send(JSON.stringify(joinMsg));
+            console.log('Sent:', joinMsg);
+        };
+        
+        ws.onmessage = function(event) {
+            const msg = JSON.parse(event.data);
+            console.log('Received:', msg);
+            const messagesDiv = document.getElementById('messages');
+            messagesDiv.innerHTML += '<p><b>Received:</b> ' + event.data + '</p>';
+        };
+        
+        ws.onerror = function(error) {
+            document.getElementById('status').innerHTML = '<b style="color:red">Error!</b>';
+            console.error('WebSocket error:', error);
+        };
+        
+        ws.onclose = function() {
+            document.getElementById('status').innerHTML = '<b style="color:orange">Disconnected</b>';
+        };
+    </script>
+</body>
+</html>
