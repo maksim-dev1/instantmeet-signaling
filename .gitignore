@@ -1,0 +1,9 @@
+# Compiled binaries
+instantmeet-signaling
+instantmeet-signaling-arm64
+
+# Go modules
+go.sum
+
+# OS files
+.DS_Store

@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>InstantMeet Signaling Test</title>
+    <style>
+        body { font-family: Arial, sans-serif; padding: 20px; }
+        #messages { border: 1px solid #ccc; padding: 10px; height: 400px; overflow-y: scroll; margin: 10px 0; }
+        .message { margin: 5px 0; padding: 5px; background: #f0f0f0; }
+        .sent { background: #d4edda; }
+        .received { background: #cce5ff; }
+        input, button { margin: 5px; padding: 8px; }
+    </style>
+</head>
+<body>
+    <h1>InstantMeet Signaling Test Client</h1>
+    
+    <div>
+        <label>Client ID: <input type="text" id="clientId" value="client-1"></label>
+        <label>Room ID: <input type="text" id="roomId" value="room-123"></label>
+        <label>Username: <input type="text" id="username" value="User1"></label>
+        <button onclick="connect()">Connect</button>
+        <button onclick="disconnect()">Disconnect</button>
+    </div>
+
+    <div>
+        <label>Target Client ID: <input type="text" id="targetId" value="client-2"></label>
+        <button onclick="sendTestOffer()">Send Test Offer</button>
+        <button onclick="sendTestAnswer()">Send Test Answer</button>
+        <button onclick="sendTestIceCandidate()">Send Test ICE</button>
+    </div>
+
+    <div id="messages"></div>
+
+    <script>
+        let ws = null;
+        let myClientId = null;
+
+        function addMessage(text, type = '') {
+            const messagesDiv = document.getElementById('messages');
+            const msgDiv = document.createElement('div');
+            msgDiv.className = 'message ' + type;
+            msgDiv.textContent = new Date().toLocaleTimeString() + ' - ' + text;
+            messagesDiv.appendChild(msgDiv);
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+        }
+
+        function connect() {
+            const clientId = document.getElementById('clientId').value;
+            const roomId = document.getElementById('roomId').value;
+            const username = document.getElementById('username').value;
+            myClientId = clientId;
+
+            ws = new WebSocket('ws://localhost:3000/ws');
+
+            ws.onopen = function() {
+                addMessage('WebSocket Connected', 'sent');
+                
+                // Отправляем join сообщение
+                const joinMsg = {
+                    type: 'join',
+                    from: clientId,
+                    roomId: roomId,
+                    username: username
+                };
+                ws.send(JSON.stringify(joinMsg));
+                addMessage('Sent JOIN: ' + JSON.stringify(joinMsg), 'sent');
+            };
+
+            ws.onmessage = function(event) {
+                addMessage('Received: ' + event.data, 'received');
+                
+                const msg = JSON.parse(event.data);
+                
+                // Автоматически отвечаем на offer
+                if (msg.type === 'offer') {
+                    setTimeout(() => {
+                        const answerMsg = {
+                            type: 'answer',
+                            from: myClientId,
+                            to: msg.from,
+                            data: { answer: 'test-answer-sdp' }
+                        };
+                        ws.send(JSON.stringify(answerMsg));
+                        addMessage('Auto-sent ANSWER to ' + msg.from, 'sent');
+                    }, 500);
+                }
+            };
+
+            ws.onerror = function(error) {
+                addMessage('WebSocket Error: ' + error, 'received');
+            };
+
+            ws.onclose = function() {
+                addMessage('WebSocket Disconnected', 'received');
+            };
+        }
+
+        function disconnect() {
+            if (ws) {
+                const leaveMsg = {
+                    type: 'leave',
+                    from: myClientId
+                };
+                ws.send(JSON.stringify(leaveMsg));
+                ws.close();
+                ws = null;
+                addMessage('Disconnected', 'sent');
+            }
+        }
+
+        function sendTestOffer() {
+            if (!ws) {
+                alert('Not connected!');
+                return;
+            }
+            const targetId = document.getElementById('targetId').value;
+            const msg = {
+                type: 'offer',
+                from: myClientId,
+                to: targetId,
+                data: { offer: 'test-offer-sdp' }
+            };
+            ws.send(JSON.stringify(msg));
+            addMessage('Sent OFFER to ' + targetId + ': ' + JSON.stringify(msg), 'sent');
+        }
+
+        function sendTestAnswer() {
+            if (!ws) {
+                alert('Not connected!');
+                return;
+            }
+            const targetId = document.getElementById('targetId').value;
+            const msg = {
+                type: 'answer',
+                from: myClientId,
+                to: targetId,
+                data: { answer: 'test-answer-sdp' }
+            };
+            ws.send(JSON.stringify(msg));
+            addMessage('Sent ANSWER to ' + targetId + ': ' + JSON.stringify(msg), 'sent');
+        }
+
+        function sendTestIceCandidate() {
+            if (!ws) {
+                alert('Not connected!');
+                return;
+            }
+            const targetId = document.getElementById('targetId').value;
+            const msg = {
+                type: 'ice-candidate',
+                from: myClientId,
+                to: targetId,
+                data: { candidate: 'test-ice-candidate' }
+            };
+            ws.send(JSON.stringify(msg));
+            addMessage('Sent ICE to ' + targetId + ': ' + JSON.stringify(msg), 'sent');
+        }
+    </script>
+</body>
+</html>
